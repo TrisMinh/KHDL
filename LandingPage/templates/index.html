@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Traffic Sign Classifier</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="hero">
+    <nav class="nav" aria-label="Main navigation">
+      <a class="brand" href="#top" aria-label="Traffic Sign Classifier home">
+        <span class="brand-mark">TS</span>
+        <span>Traffic Sign Classifier</span>
+      </a>
+      <a class="nav-link" href="#predict">Predict</a>
+    </nav>
+
+    <section class="hero-content" id="top">
+      <p class="eyebrow">MobileNetV2 + SE Attention</p>
+      <h1>Traffic Sign Classifier</h1>
+      <p class="hero-copy">
+        Upload a road scene, crop the traffic sign region, and classify it with the trained model.
+      </p>
+      <a class="hero-action" href="#predict">
+        <i data-lucide="scan-line"></i>
+        Start prediction
+      </a>
+    </section>
+  </header>
+
+  <main>
+    <section class="predict-band" id="predict">
+      <div class="section-head">
+        <p class="eyebrow">Interactive prediction</p>
+        <h2>Upload, crop, predict</h2>
+      </div>
+
+      <div class="predict-layout">
+        <section class="tool-panel" aria-label="Prediction tool">
+          <label class="upload-zone" for="imageInput">
+            <i data-lucide="upload-cloud"></i>
+            <span class="upload-title">Choose traffic sign image</span>
+            <span class="upload-subtitle">JPG, PNG, or WEBP</span>
+            <input id="imageInput" type="file" accept="image/*">
+          </label>
+
+          <div class="crop-shell" id="cropShell" hidden>
+            <img id="previewImage" alt="Uploaded image preview">
+          </div>
+
+          <div class="actions">
+            <button class="btn secondary" id="resetButton" type="button" disabled>
+              <i data-lucide="rotate-ccw"></i>
+              Reset
+            </button>
+            <button class="btn primary" id="predictButton" type="button" disabled>
+              <i data-lucide="search-check"></i>
+              Predict
+            </button>
+          </div>
+
+          <p class="status" id="statusText">Select an image, then crop the sign region before prediction.</p>
+        </section>
+
+        <aside class="result-panel" aria-label="Prediction result">
+          <div class="result-empty" id="emptyState">
+            <i data-lucide="traffic-cone"></i>
+            <p>Prediction will appear here.</p>
+          </div>
+
+          <div class="result-content" id="resultContent" hidden>
+            <div class="result-top">
+              <img id="cropPreview" alt="Cropped traffic sign preview">
+              <div>
+                <p class="eyebrow">Predicted class</p>
+                <h3 id="predictedLabel">-</h3>
+                <p id="predictedConfidence">-</p>
+              </div>
+            </div>
+            <div class="bars" id="topBars"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="classes-band">
+      <div class="section-head">
+        <p class="eyebrow">Supported labels</p>
+        <h2>12 traffic sign classes</h2>
+      </div>
+      <div class="class-grid">
+        {% for name in class_names %}
+        <span>{{ name.replace("_", " ") }}</span>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="sample-band">
+      <div class="sample-copy">
+        <p class="eyebrow">Model asset</p>
+        <h2>{{ model_name }}</h2>
+        <p>
+          The website calls a Flask prediction API that loads the saved MobileNetV2-SE checkpoint.
+          For real-world road scenes, crop the sign first so the classifier receives the correct region.
+        </p>
+      </div>
+      <div class="sample-strip" aria-label="Sample traffic signs">
+        <img src="{{ url_for('static', filename='sample_no_entry.jpg') }}" alt="No entry sample">
+        <img src="{{ url_for('static', filename='sample_stop_sign.jpg') }}" alt="Stop sign sample">
+        <img src="{{ url_for('static', filename='sample_speed_limit_30.jpg') }}" alt="Speed limit sample">
+        <img src="{{ url_for('static', filename='sample_roadworks.jpg') }}" alt="Roadworks sample">
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
