@@ -1,8 +1,8 @@
 # BÁO CÁO CHUYÊN ĐỀ
 
-# KIẾN TRÚC MOBILENETV2 TRONG BÀI TOÁN PHÂN LOẠI BIỂN BÁO GIAO THÔNG
+# KIẾN TRÚC MOBILENETV2 VÀ SE ATTENTION TRONG BÀI TOÁN PHÂN LOẠI BIỂN BÁO GIAO THÔNG
 
-**Phạm vi báo cáo:** tập trung vào phần mô hình MobileNetV2, đặc biệt là kiến trúc, nguyên lý thiết kế, phân tích block, độ phức tạp tính toán và cách triển khai trong notebook. Các phần thu thập dữ liệu, crawl dữ liệu và tiền xử lý chỉ được nhắc ở mức bối cảnh vì do phần khác của nhóm phụ trách.
+**Phạm vi báo cáo:** tập trung vào phần mô hình MobileNetV2, đặc biệt là kiến trúc, nguyên lý thiết kế, phân tích block, độ phức tạp tính toán, cách triển khai trong notebook và phiên bản cải tiến có SE Attention. Các phần thu thập dữ liệu, crawl dữ liệu và tiền xử lý chỉ được nhắc ở mức bối cảnh vì do phần khác của nhóm phụ trách.
 
 ---
 
@@ -12,7 +12,7 @@
 2. Tổng quan MobileNetV2
 3. Nền tảng: từ convolution thường đến depthwise separable convolution
 4. Các thành phần kiến trúc chính
-5. Inverted Residual Block và Linear Bottleneck
+5. Inverted Residual Block, Linear Bottleneck và SE Attention
 6. Kiến trúc MobileNetV2 đầy đủ
 7. Phân tích tensor shape, tham số và MACs
 8. Giải phẫu từng stage trong MobileNetV2 notebook
@@ -20,8 +20,9 @@
 10. MobileNetV2 như bộ trích xuất đặc trưng cho biển báo giao thông
 11. Huấn luyện và đánh giá mô hình MobileNetV2
 12. Nhận xét, hạn chế và hướng cải thiện
-13. Kết luận
-14. Tài liệu tham khảo
+13. Danh sách hình cần bổ sung cho phiên bản SE Attention
+14. Kết luận
+15. Tài liệu tham khảo
 
 ---
 
@@ -52,6 +53,7 @@ Khi báo cáo về MobileNetV2, nếu chỉ ghi "dùng MobileNetV2 để phân l
 - Bỏ activation ở projection layer để tạo linear bottleneck.
 - Dùng ReLU6 để thuận lợi cho tính toán thấp-bit và thiết bị di động.
 - Dùng global average pooling thay vì flatten toàn bộ feature map để giảm tham số classifier.
+- Ở phiên bản cải tiến v7, bổ sung SE Attention vào inverted residual block để mô hình tự học mức độ quan trọng của từng channel đặc trưng.
 
 Những điểm này là trọng tâm của báo cáo.
 
@@ -63,7 +65,7 @@ Pipeline rút gọn:
 SplitData/train, val, test
 -> ImageFolder
 -> Transform + Normalize
--> MobileNetV2
+-> MobileNetV2 / MobileNetV2 + SE Attention
 -> logits
 -> CrossEntropyLoss
 -> Accuracy / Precision / Recall / F1
@@ -378,7 +380,7 @@ Trong notebook, ReLU6 được dùng ở expansion và depthwise convolution, nh
 
 ---
 
-# 5. Inverted Residual Block và Linear Bottleneck
+# 5. Inverted Residual Block, Linear Bottleneck và SE Attention
 
 ## 5.1. Đây là phần lõi của MobileNetV2
 
@@ -386,6 +388,12 @@ Nếu chỉ nhớ một ý về MobileNetV2, đó là:
 
 ```text
 MobileNetV2 = Depthwise Separable Conv + Inverted Residual + Linear Bottleneck
+```
+
+Trong phiên bản v7, notebook bổ sung **SE Attention** vào block chính:
+
+```text
+MobileNetV2-SE = Depthwise Separable Conv + Inverted Residual + Linear Bottleneck + SE Attention
 ```
 
 Inverted Residual Block trong notebook:
@@ -405,6 +413,9 @@ class InvertedResidual(nn.Module):
                                   stride=stride,
                                   groups=hidden_dim))
 
+        if use_attention:
+            layers.append(SEBlock(hidden_dim, reduction=attention_reduction))
+
         layers.extend([
             nn.Conv2d(hidden_dim, out_channels, 1, 1, 0, bias=False),
             nn.BatchNorm2d(out_channels),
@@ -418,6 +429,7 @@ Luồng tổng quát:
 Input hẹp
 -> 1x1 expansion
 -> 3x3 depthwise
+-> SE attention
 -> 1x1 projection tuyến tính
 -> cộng skip nếu shape giống nhau
 ```
@@ -646,6 +658,72 @@ MACs_block = H x W x t x C_in x C_in
 
 Trong paper, công thức được viết gọn theo kích thước block và expansion factor. Ý nghĩa chính là: block có thêm một 1x1 expansion so với MobileNetV1, nhưng nhờ input/output bottleneck hẹp, tổng chi phí vẫn thấp và memory hiệu quả.
 
+## 5.11. SE Attention trong phiên bản v7
+
+SE là viết tắt của **Squeeze-and-Excitation**. Đây là attention theo channel, tức mô hình học xem channel đặc trưng nào nên được nhấn mạnh và channel nào nên giảm ảnh hưởng.
+
+Trong một feature map có dạng:
+
+```text
+C x H x W
+```
+
+mỗi channel có thể chứa một kiểu đặc trưng khác nhau, ví dụ cạnh tròn, vùng đỏ, viền trắng, ký hiệu bên trong biển báo hoặc nhiễu từ nền ảnh. SE block xử lý theo ba bước:
+
+```text
+Squeeze    : Global Average Pooling, C x H x W -> C x 1 x 1
+Excitation : mạng nhỏ C -> C/reduction -> C
+Reweight   : nhân trọng số attention vào từng channel
+```
+
+Code rút gọn trong notebook v7:
+
+```python
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=4):
+        reduced_channels = max(8, channels // reduction)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, reduced_channels, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(reduced_channels, channels, kernel_size=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        scale = self.fc(self.pool(x))
+        return x * scale
+```
+
+Ý nghĩa của `reduction = 4`:
+
+```text
+C -> C/4 -> C
+```
+
+Ví dụ nếu hidden channel trong block là 96:
+
+```text
+96 -> 24 -> 96
+```
+
+Giá trị đầu ra của `Sigmoid` nằm trong khoảng 0 đến 1. Channel nào hữu ích cho phân loại sẽ có trọng số lớn hơn, channel nào ít hữu ích hoặc gây nhiễu sẽ bị giảm. Quá trình này được học tự động thông qua backpropagation từ loss phân loại.
+
+Trong v7, SE được đặt sau depthwise convolution và trước projection:
+
+```text
+Input
+-> 1x1 expansion
+-> 3x3 depthwise convolution
+-> SE attention
+-> 1x1 linear projection
+-> skip connection nếu đủ điều kiện
+```
+
+Lý do đặt ở vị trí này là sau depthwise convolution, từng channel đã chứa đặc trưng không gian riêng. SE lúc này có thể đánh giá channel nào quan trọng trước khi projection nén tensor về bottleneck hẹp.
+
+> Cần bổ sung hình: sơ đồ `Expansion -> Depthwise -> SE -> Projection -> Skip` cho phiên bản v7.
+
 ---
 
 # 6. Kiến trúc MobileNetV2 đầy đủ
@@ -706,55 +784,56 @@ inverted_residual_setting = [
 ]
 ```
 
-Notebook hiện dùng input 96x96 và first conv stride 1 để tránh giảm kích thước quá sớm:
+Notebook hiện dùng input 224x224. Với kích thước này, first conv dùng stride 2 giống cấu hình MobileNetV2 chuẩn để giảm spatial size từ đầu và kiểm soát chi phí tính toán:
 
 ```text
-Input 96x96
--> Conv đầu stride 1
+Input 224x224
+-> Conv đầu stride 2
 -> các stage bottleneck giảm dần spatial size
 ```
 
-Với ảnh biển báo, input 96x96 vẫn đủ giữ chi tiết số, viền, mũi tên và ký hiệu chính, đồng thời giảm đáng kể thời gian train so với 224x224.
+Với ảnh biển báo đã được resize/crop về 224x224, mô hình có đủ độ phân giải để học viền, ký hiệu, chữ số và mũi tên. Đổi lại, input 224x224 tốn thời gian train và VRAM hơn so với các kích thước nhỏ như 96x96.
 
-## 6.3. Luồng feature map với input 96x96
+## 6.3. Luồng feature map với input 224x224
 
 Với cấu hình notebook:
 
 | Stage | Operator | Output size | Channels | Ý nghĩa đặc trưng |
 |---|---|---:|---:|---|
-| Input | ảnh RGB | 96x96 | 3 | pixel ảnh biển báo |
-| Conv đầu | 3x3 s=1 | 96x96 | 32 | cạnh, màu, gradient |
-| Stage 1 | bottleneck t=1 | 96x96 | 16 | lọc đặc trưng thô |
-| Stage 2 | bottleneck t=6 | 48x48 | 24 | texture, viền |
-| Stage 3 | bottleneck t=6 | 24x24 | 32 | hình tròn/tam giác/chữ số |
-| Stage 4 | bottleneck t=6 | 12x12 | 64 | ký hiệu, mũi tên, cấu trúc |
-| Stage 5 | bottleneck t=6 | 12x12 | 96 | kết hợp bộ phận |
-| Stage 6 | bottleneck t=6 | 6x6 | 160 | đặc trưng ngữ nghĩa |
-| Stage 7 | bottleneck t=6 | 6x6 | 320 | tổng hợp class-level |
-| Conv cuối | 1x1 | 6x6 | 1280 | feature vector giàu thông tin |
+| Input | ảnh RGB | 224x224 | 3 | pixel ảnh biển báo |
+| Conv đầu | 3x3 s=2 | 112x112 | 32 | cạnh, màu, gradient |
+| Stage 1 | bottleneck t=1 | 112x112 | 16 | lọc đặc trưng thô |
+| Stage 2 | bottleneck t=6 | 56x56 | 24 | texture, viền |
+| Stage 3 | bottleneck t=6 | 28x28 | 32 | hình tròn/tam giác/chữ số |
+| Stage 4 | bottleneck t=6 | 14x14 | 64 | ký hiệu, mũi tên, cấu trúc |
+| Stage 5 | bottleneck t=6 | 14x14 | 96 | kết hợp bộ phận |
+| Stage 6 | bottleneck t=6 | 7x7 | 160 | đặc trưng ngữ nghĩa |
+| Stage 7 | bottleneck t=6 | 7x7 | 320 | tổng hợp class-level |
+| Conv cuối | 1x1 | 7x7 | 1280 | feature vector giàu thông tin |
 | GAP | avgpool | 1x1 | 1280 | gom không gian |
 | Linear | classifier | - | num_classes | logits |
 
 ![Feature map size reduction](<../ly_thuyet/Ảnh info grafic/Phần 4/4.13. Hình feature map size reduction.png>)
 
-## 6.4. Vì sao first conv stride 1 hợp lý với input 96
+## 6.4. Vì sao first conv stride 2 hợp lý với input 224
 
-Trong paper gốc, input ImageNet là 224x224 nên first conv stride 2 đưa feature map về 112x112. Với input 96x96, nếu dùng stride 2 ngay từ đầu, feature map còn 48x48 trước khi qua bottleneck đầu. Với ảnh biển báo nhỏ, điều này có thể làm mất chi tiết sớm, đặc biệt là chữ số và ký hiệu nhỏ.
+Trong paper gốc, input ImageNet là 224x224 nên first conv stride 2 đưa feature map về 112x112. Notebook hiện cũng dùng input 224x224, vì vậy stride 2 là hợp lý để giảm chi phí tính toán ngay từ đầu mà vẫn giữ đủ chi tiết không gian.
 
-Do đó notebook dùng stride 1 ở first conv để:
+Lý do dùng stride 2 ở first conv:
 
-- Giữ chi tiết ban đầu.
-- Cho các layer đầu học cạnh/viền tốt hơn.
-- Phù hợp với input ảnh crop nhỏ.
+- Giữ đúng tinh thần kiến trúc MobileNetV2 chuẩn với input 224x224.
+- Giảm spatial size từ 224x224 xuống 112x112 để tiết kiệm VRAM và thời gian train.
+- Vẫn giữ đủ chi tiết vì ảnh đầu vào lớn hơn so với cấu hình nhỏ như 96x96.
+- Phù hợp với dữ liệu đã resize/crop về kích thước thống nhất.
 
-Đổi lại, stride 1 làm tăng tính toán và VRAM ở stage đầu. Tuy nhiên với input 96x96 và batch size 32, chi phí vẫn kiểm soát được.
+Nếu dùng stride 1 với input 224x224, feature map đầu giữ 224x224 quá lâu, làm tăng đáng kể chi phí tính toán và bộ nhớ. Vì vậy trong notebook, stride đầu được chọn theo điều kiện `first_stride = 2 if IMG_SIZE >= 160 else 1`.
 
 ## 6.5. Adaptive average pooling và classifier
 
 Sau các feature layers, tensor có dạng:
 
 ```text
-[B, 1280, 6, 6]
+[B, 1280, 7, 7]
 ```
 
 Adaptive average pooling đưa về:
@@ -788,6 +867,34 @@ self.classifier = nn.Sequential(
 - Buộc mỗi channel học một loại đặc trưng tổng quát.
 - Giúp mô hình bớt phụ thuộc vị trí chính xác của đặc trưng.
 - Phù hợp với ảnh classification đã crop.
+
+## 6.6. Kiến trúc v7 sau khi thêm SE Attention
+
+Phiên bản v7 không thay đổi số stage chính của MobileNetV2. Điểm khác biệt nằm trong từng inverted residual block: sau depthwise convolution có thêm SE block.
+
+| Thành phần | MobileNetV2 v6 | MobileNetV2-SE v7 |
+|---|---|---|
+| Input | ảnh biển báo crop | ảnh biển báo crop |
+| Block chính | Inverted Residual | Inverted Residual + SE |
+| Attention | không có | SE channel attention |
+| Vị trí attention | - | sau depthwise, trước projection |
+| `attention_reduction` | - | 4 |
+| Checkpoint/log | `mobilenetv2_gtsrb` | `mobilenetv2_gtsrb_v7_attention` |
+
+Luồng block v7:
+
+```text
+Input hẹp
+-> 1x1 expand
+-> 3x3 depthwise
+-> SE attention
+-> 1x1 project linear
+-> skip nếu stride=1 và channel bằng nhau
+```
+
+Việc thêm SE làm số tham số tăng nhẹ vì mỗi block có thêm hai layer 1x1 trong attention. Tuy nhiên, so với toàn bộ MobileNetV2, phần tăng thêm vẫn nhỏ và phù hợp với mục tiêu mô hình nhẹ.
+
+> Cần bổ sung hình: bảng so sánh model size/parameter count giữa v6 và v7 sau khi chạy notebook.
 
 ---
 
@@ -897,20 +1004,20 @@ Ngoài width, độ phân giải input cũng ảnh hưởng mạnh đến MACs:
 MACs tỷ lệ xấp xỉ với H x W
 ```
 
-Nếu giảm input từ 224x224 xuống 96x96:
+Notebook hiện chọn input 224x224, tức dùng độ phân giải đầy đủ hơn so với các cấu hình nhỏ như 96x96. Nếu so với 96x96, chi phí theo không gian tăng xấp xỉ:
 
 ```text
-(96 x 96) / (224 x 224) ≈ 0.184
+(224 x 224) / (96 x 96) ≈ 5.44
 ```
 
-Tức phần lớn convolution theo không gian giảm còn khoảng 18.4% chi phí so với input 224, dù do first stride và cấu trúc cụ thể, tỷ lệ thực tế có thể khác.
+Điều này làm thời gian train và VRAM tăng, nhưng đổi lại mô hình giữ được nhiều chi tiết hơn trên biển báo, đặc biệt là chữ số, mũi tên, vạch trắng hoặc ký hiệu nhỏ.
 
-Với ảnh biển báo đã crop, input 96x96 là điểm cân bằng hợp lý:
+Với ảnh biển báo đã crop, input 224x224 phù hợp khi mục tiêu là ưu tiên độ chính xác và khả năng phân biệt chi tiết nhỏ:
 
-- Giữ đủ chi tiết chính.
-- Train nhanh hơn 224x224.
-- Ít VRAM hơn.
-- Phù hợp với mô hình nhẹ.
+- Giữ nhiều chi tiết hình học hơn.
+- Phù hợp với MobileNetV2 chuẩn.
+- Tốn thời gian train hơn cấu hình nhỏ.
+- Cần batch size vừa phải để tránh OOM.
 
 ---
 
@@ -926,14 +1033,14 @@ MobileNetV2 không phải là một chuỗi layer giống nhau. Mỗi stage có 
 3. Stage này học loại đặc trưng nào của ảnh biển báo?
 ```
 
-Với input 96x96, việc phân tích stage càng quan trọng vì ảnh nhỏ hơn ImageNet 224x224. Nếu giảm spatial size quá sớm, mô hình có thể mất chi tiết chữ số hoặc biểu tượng. Vì vậy notebook dùng first conv stride 1 để giữ độ phân giải ban đầu.
+Với input 224x224, notebook có thể dùng first conv stride 2 giống MobileNetV2 chuẩn mà vẫn giữ đủ chi tiết sau tầng đầu. Việc phân tích theo stage giúp thấy rõ mô hình giảm spatial size dần từ 224x224 xuống 7x7, đồng thời tăng số channel để chuyển từ đặc trưng cạnh/màu sang đặc trưng ngữ nghĩa.
 
 ## 8.2. Stage 0: Input và convolution đầu
 
 Input của mô hình:
 
 ```text
-[B, 3, 96, 96]
+[B, 3, 224, 224]
 ```
 
 Trong đó:
@@ -941,28 +1048,28 @@ Trong đó:
 ```text
 B: batch size
 3: RGB channels
-96 x 96: kích thước ảnh sau resize hoặc dữ liệu đã chuẩn bị sẵn
+224 x 224: kích thước ảnh sau resize hoặc dữ liệu đã chuẩn bị sẵn
 ```
 
 Convolution đầu:
 
 ```text
-Conv 3x3, stride 1, output 32 channels
+Conv 3x3, stride 2, output 32 channels
 ```
 
 Output:
 
 ```text
-[B, 32, 96, 96]
+[B, 32, 112, 112]
 ```
 
 Vai trò:
 
 - Chuyển ảnh RGB 3 kênh thành 32 feature channels.
 - Học các cạnh, vùng màu, gradient sáng tối.
-- Giữ nguyên spatial size để không mất chi tiết sớm.
+- Giảm spatial size còn 112x112 để tiết kiệm chi phí nhưng vẫn giữ đủ chi tiết ban đầu.
 
-Với biển báo, các đặc trưng đầu vào như viền đỏ, nền xanh, nền trắng, cạnh tam giác, cạnh tròn và chữ số là tín hiệu rất mạnh. Nếu dùng stride 2 ngay, một số chi tiết nhỏ có thể bị nén quá sớm.
+Với input 224x224, sau stride 2 feature map vẫn còn 112x112, đủ để giữ các đặc trưng như viền đỏ, nền xanh, nền trắng, cạnh tam giác, cạnh tròn và chữ số.
 
 ## 8.3. Stage 1: Bottleneck t=1, c=16, n=1, s=1
 
@@ -978,10 +1085,10 @@ s = 1
 Output:
 
 ```text
-[B, 16, 96, 96]
+[B, 16, 112, 112]
 ```
 
-Stage này không dùng expansion vì `t=1`. Nó chủ yếu nén 32 channels từ convolution đầu về 16 channels, giữ nguyên spatial size. Đây là bước lọc đặc trưng thô, loại bớt kênh không cần thiết và chuẩn bị cho các stage sâu hơn.
+Stage này không dùng expansion vì `t=1`. Nó chủ yếu nén 32 channels từ convolution đầu về 16 channels, giữ spatial size 112x112. Đây là bước lọc đặc trưng thô, loại bớt kênh không cần thiết và chuẩn bị cho các stage sâu hơn.
 
 Vì output channel khác input channel, block này không dùng skip connection. Skip chỉ dùng khi input và output cùng shape.
 
@@ -1005,13 +1112,13 @@ s = 2
 Block đầu của stage dùng stride 2:
 
 ```text
-96 x 96 -> 48 x 48
+112 x 112 -> 56 x 56
 ```
 
 Output cuối stage:
 
 ```text
-[B, 24, 48, 48]
+[B, 24, 56, 56]
 ```
 
 Stage này có 2 block. Block đầu giảm spatial size, block thứ hai giữ spatial size. Block thứ hai có thể dùng skip connection nếu input/output cùng channel 24.
@@ -1022,7 +1129,7 @@ Vai trò:
 - Tăng channel từ 16 lên 24 để tăng biểu diễn.
 - Học texture, viền, vùng màu, các cạnh rõ của biển báo.
 
-Với biển báo, đây là giai đoạn mô hình bắt đầu nhận ra các pattern như viền tròn, viền tam giác, vùng màu đỏ/xanh/trắng. Vì spatial size vẫn còn 48x48, các chi tiết hình học lớn vẫn được giữ tốt.
+Với biển báo, đây là giai đoạn mô hình bắt đầu nhận ra các pattern như viền tròn, viền tam giác, vùng màu đỏ/xanh/trắng. Vì spatial size vẫn còn 56x56, các chi tiết hình học lớn vẫn được giữ tốt.
 
 ## 8.5. Stage 3: Bottleneck t=6, c=32, n=3, s=2
 
@@ -1038,13 +1145,13 @@ s = 2
 Output:
 
 ```text
-[B, 32, 24, 24]
+[B, 32, 28, 28]
 ```
 
 Stage này có 3 block:
 
-- Block đầu giảm spatial size từ 48x48 xuống 24x24.
-- Hai block sau giữ 24x24 và có thể dùng skip connection.
+- Block đầu giảm spatial size từ 56x56 xuống 28x28.
+- Hai block sau giữ 28x28 và có thể dùng skip connection.
 
 Vai trò:
 
@@ -1068,10 +1175,10 @@ s = 2
 Output:
 
 ```text
-[B, 64, 12, 12]
+[B, 64, 14, 14]
 ```
 
-Stage này giảm spatial size xuống 12x12 nhưng tăng channel lên 64. Số block nhiều hơn, nên mô hình có nhiều bước phi tuyến để kết hợp đặc trưng.
+Stage này giảm spatial size xuống 14x14 nhưng tăng channel lên 64. Số block nhiều hơn, nên mô hình có nhiều bước phi tuyến để kết hợp đặc trưng.
 
 Vai trò:
 
@@ -1085,7 +1192,7 @@ Ví dụ:
 - Hai biển đều nền xanh nhưng khác hướng mũi tên.
 - Các biển tốc độ khác nhau chỉ khác chữ số.
 
-Ở 12x12, chi tiết rất nhỏ đã bị nén, nhưng kênh nhiều hơn giúp mô hình biểu diễn ý nghĩa của đặc trưng thay vì giữ pixel gốc.
+Ở 14x14, chi tiết nhỏ đã được nén, nhưng kênh nhiều hơn giúp mô hình biểu diễn ý nghĩa của đặc trưng thay vì giữ pixel gốc.
 
 ## 8.7. Stage 5: Bottleneck t=6, c=96, n=3, s=1
 
@@ -1101,10 +1208,10 @@ s = 1
 Output:
 
 ```text
-[B, 96, 12, 12]
+[B, 96, 14, 14]
 ```
 
-Điểm đáng chú ý là stage này không giảm spatial size. Nó giữ 12x12 nhưng tăng channel từ 64 lên 96.
+Điểm đáng chú ý là stage này không giảm spatial size. Nó giữ 14x14 nhưng tăng channel từ 64 lên 96.
 
 Vai trò:
 
@@ -1112,7 +1219,7 @@ Vai trò:
 - Cho mô hình thêm thời gian xử lý ở độ phân giải trung gian.
 - Kết hợp đặc trưng bộ phận thành cấu trúc class.
 
-Với ảnh biển báo, giữ 12x12 ở stage này là hợp lý vì mô hình vẫn cần phân biệt ký hiệu, chữ số hoặc mũi tên. Nếu giảm xuống 6x6 quá sớm, một số chi tiết class có thể bị mất.
+Với ảnh biển báo, giữ 14x14 ở stage này là hợp lý vì mô hình vẫn cần phân biệt ký hiệu, chữ số hoặc mũi tên. Nếu giảm xuống 7x7 quá sớm, một số chi tiết class có thể bị mất.
 
 ## 8.8. Stage 6: Bottleneck t=6, c=160, n=3, s=2
 
@@ -1128,10 +1235,10 @@ s = 2
 Output:
 
 ```text
-[B, 160, 6, 6]
+[B, 160, 7, 7]
 ```
 
-Stage này chuyển từ 12x12 xuống 6x6. Đây là giai đoạn đặc trưng trở nên ngữ nghĩa hơn, tức mỗi vị trí trên feature map đã nhìn một vùng lớn của ảnh gốc.
+Stage này chuyển từ 14x14 xuống 7x7. Đây là giai đoạn đặc trưng trở nên ngữ nghĩa hơn, tức mỗi vị trí trên feature map đã nhìn một vùng lớn của ảnh gốc.
 
 Vai trò:
 
@@ -1155,10 +1262,10 @@ s = 1
 Output:
 
 ```text
-[B, 320, 6, 6]
+[B, 320, 7, 7]
 ```
 
-Stage cuối của bottleneck tăng channel lên 320 nhưng giữ spatial size 6x6. Vì chỉ có một block, nó đóng vai trò tổng hợp đặc trưng trước convolution 1x1 cuối.
+Stage cuối của bottleneck tăng channel lên 320 nhưng giữ spatial size 7x7. Vì chỉ có một block, nó đóng vai trò tổng hợp đặc trưng trước convolution 1x1 cuối.
 
 Vai trò:
 
@@ -1171,26 +1278,26 @@ Vai trò:
 Sau các bottleneck, MobileNetV2 dùng convolution 1x1 cuối:
 
 ```text
-[B, 320, 6, 6] -> [B, 1280, 6, 6]
+[B, 320, 7, 7] -> [B, 1280, 7, 7]
 ```
 
 Mục đích:
 
 - Mở rộng số kênh trước classifier.
 - Tạo vector đặc trưng giàu thông tin hơn.
-- Giúp global average pooling có 1280 channel để tổng hợp.
+- Trộn mạnh thông tin giữa các kênh.
 
 Convolution 1x1 cuối không học quan hệ không gian mới, nhưng trộn mạnh thông tin giữa các kênh. Đây là bước biến các đặc trưng stage cuối thành embedding có chiều cao hơn.
 
-## 8.11. Global average pooling: 6x6 -> 1x1
+## 8.11. Global average pooling: 7x7 -> 1x1
 
 Global average pooling:
 
 ```text
-[B, 1280, 6, 6] -> [B, 1280, 1, 1]
+[B, 1280, 7, 7] -> [B, 1280, 1, 1]
 ```
 
-Mỗi channel được lấy trung bình trên toàn bộ 6x6 vị trí. Có thể hiểu mỗi channel như một detector đặc trưng. Nếu channel đó phản ứng mạnh ở nhiều vị trí, giá trị trung bình cao; nếu không phát hiện đặc trưng, giá trị thấp.
+Mỗi channel được lấy trung bình trên toàn bộ 7x7 vị trí. Có thể hiểu mỗi channel như một detector đặc trưng. Nếu channel đó phản ứng mạnh ở nhiều vị trí, giá trị trung bình cao; nếu không phát hiện đặc trưng, giá trị thấp.
 
 Với ảnh crop biển báo, global average pooling hợp lý vì đối tượng chính đã nằm trong ảnh. Mô hình không cần biết chính xác ký hiệu nằm ở pixel nào; nó cần biết ảnh có những đặc trưng nào.
 
@@ -1247,19 +1354,19 @@ Trong MobileNetV2:
 Nếu tensor cuối là:
 
 ```text
-[B, 1280, 6, 6]
+[B, 1280, 7, 7]
 ```
 
 Flatten trực tiếp sẽ tạo vector:
 
 ```text
-1280 x 6 x 6 = 46,080 chiều
+1280 x 7 x 7 = 62,720 chiều
 ```
 
-Nếu classifier từ 46,080 chiều sang 12 class:
+Nếu classifier từ 62,720 chiều sang 12 class:
 
 ```text
-46,080 x 12 = 552,960 tham số
+62,720 x 12 = 752,640 tham số
 ```
 
 Nếu dùng global average pooling:
@@ -1286,7 +1393,7 @@ Số tham số classifier giảm mạnh. Với dữ liệu custom không quá l�
 
 # 9. Triển khai MobileNetV2 từ đầu trong notebook
 
-## 8.1. Không dùng pretrained
+## 9.1. Không dùng pretrained
 
 Notebook xây dựng model:
 
@@ -1308,7 +1415,7 @@ Vì vậy đây là mô hình **train from scratch**. Trọng số ban đầu đ
 
 Điều này cần nói rõ trong báo cáo vì khác với transfer learning. Nếu dùng pretrained, mô hình đã học đặc trưng ImageNet. Còn ở đây, toàn bộ đặc trưng biển báo được học từ dữ liệu custom.
 
-## 8.2. Mapping giữa lý thuyết và code
+## 9.2. Mapping giữa lý thuyết và code
 
 | Lý thuyết MobileNetV2 | Code trong notebook |
 |---|---|
@@ -1321,7 +1428,35 @@ Vì vậy đây là mô hình **train from scratch**. Trọng số ban đầu đ
 | Global average pooling | `adaptive_avg_pool2d(x, (1, 1))` |
 | Classifier | `Dropout + Linear` |
 
-## 8.3. Forward pass
+Với phiên bản v7 có SE Attention, bảng mapping bổ sung:
+
+| Thành phần v7 | Code trong notebook |
+|---|---|
+| SE attention block | `SEBlock` |
+| Squeeze | `nn.AdaptiveAvgPool2d(1)` |
+| Excitation | `Conv2d(C, C/reduction, 1) -> ReLU -> Conv2d(C/reduction, C, 1) -> Sigmoid` |
+| Reweight channel | `return x * scale` |
+| Bật/tắt attention | `CONFIG['attention_enabled']` |
+| Mức nén SE | `CONFIG['attention_reduction']` |
+
+Vị trí SE trong code v7:
+
+```python
+layers.append(ConvBNReLU6(hidden_dim, hidden_dim,
+                          kernel_size=3,
+                          stride=stride,
+                          groups=hidden_dim))
+
+if self.use_attention:
+    layers.append(SEBlock(hidden_dim, reduction=attention_reduction))
+
+layers.extend([
+    nn.Conv2d(hidden_dim, out_channels, 1, 1, 0, bias=False),
+    nn.BatchNorm2d(out_channels),
+])
+```
+
+## 9.3. Forward pass
 
 Forward pass trong MobileNetV2:
 
@@ -1342,7 +1477,7 @@ Output là logits:
 
 Không đặt softmax trong `forward` vì `CrossEntropyLoss` của PyTorch nhận logits trực tiếp. Softmax chỉ dùng khi cần hiển thị xác suất trong quá trình dự đoán.
 
-## 8.4. Test output shape
+## 9.4. Test output shape
 
 Notebook kiểm tra bằng dummy tensor:
 
@@ -1365,7 +1500,7 @@ out.shape = [1, 43]
 
 Kiểm tra này giúp phát hiện lỗi dimension trước khi train thật.
 
-## 8.5. Vì sao dropout đặt ở classifier
+## 9.5. Vì sao dropout đặt ở classifier
 
 Dropout được đặt trước Linear cuối:
 
@@ -1376,7 +1511,7 @@ nn.Linear(last_channels, num_classes)
 
 Dropout giúp giảm overfitting bằng cách tắt ngẫu nhiên một phần feature trong train. Vì ảnh biển báo custom có thể dễ và crop sạch, dropout là regularization cần thiết để mô hình không quá tự tin vào một vài feature cụ thể.
 
-## 8.6. Cấu hình train hiện tại liên quan kiến trúc
+## 9.6. Cấu hình train hiện tại liên quan kiến trúc
 
 Cấu hình đang dùng:
 
@@ -1403,7 +1538,7 @@ Các tham số này không thay đổi kiến trúc lõi, nhưng ảnh hưởng 
 
 # 10. MobileNetV2 như bộ trích xuất đặc trưng cho biển báo giao thông
 
-## 9.1. Tầng đầu học gì
+## 10.1. Tầng đầu học gì
 
 Các layer đầu của CNN thường học:
 
@@ -1423,7 +1558,7 @@ Biển cảnh báo: tam giác, viền đỏ
 Biển stop: bát giác đỏ
 ```
 
-## 9.2. Tầng giữa học gì
+## 10.2. Tầng giữa học gì
 
 Các stage giữa học các pattern phức tạp hơn:
 
@@ -1435,7 +1570,7 @@ Các stage giữa học các pattern phức tạp hơn:
 
 Ở giai đoạn này, spatial size đã giảm nhưng vẫn còn đủ để giữ cấu trúc biển báo.
 
-## 9.3. Tầng sâu học gì
+## 10.3. Tầng sâu học gì
 
 Các stage cuối học đặc trưng gần với class:
 
@@ -1445,7 +1580,7 @@ Các stage cuối học đặc trưng gần với class:
 
 Sau global average pooling, vector 1280 chiều có thể xem là embedding của ảnh biển báo. Classifier cuối chỉ cần ánh xạ embedding này sang class.
 
-## 9.4. Vì sao MobileNetV2 hợp với ảnh biển báo crop
+## 10.4. Vì sao MobileNetV2 hợp với ảnh biển báo crop
 
 Ảnh biển báo crop có đặc điểm:
 
@@ -1461,7 +1596,7 @@ MobileNetV2 phù hợp vì:
 - Skip connection giúp mạng đủ sâu để phân biệt class tương tự.
 - Global average pooling giảm phụ thuộc vị trí nhỏ của biển trong crop.
 
-## 9.5. Trường hợp dễ nhầm
+## 10.5. Trường hợp dễ nhầm
 
 MobileNetV2 có thể nhầm khi:
 
@@ -1477,7 +1612,7 @@ Các trường hợp này nên được phân tích bằng confusion matrix, per
 
 # 11. Huấn luyện và đánh giá mô hình MobileNetV2
 
-## 10.1. Loss và optimizer
+## 11.1. Loss và optimizer
 
 Mô hình dùng `CrossEntropyLoss` cho classification nhiều lớp:
 
@@ -1499,7 +1634,7 @@ optimizer = optim.SGD(
 
 Với MobileNetV2 train from scratch, SGD + momentum là lựa chọn hợp lý vì thường generalize tốt trong image classification.
 
-## 10.2. Learning rate schedule
+## 11.2. Learning rate schedule
 
 Scheduler:
 
@@ -1513,9 +1648,9 @@ Warmup giúp mô hình ổn định khi weights còn random. Cosine decay giảm
 
 ![Cosine annealing](<../ly_thuyet/Ảnh info grafic/Phần 5/5.8. Hình cosine annealing.png>)
 
-## 10.3. Kết quả validation hiện tại
+## 11.3. Kết quả validation hiện tại
 
-Log huấn luyện đã cho thấy mô hình học rất nhanh:
+Log huấn luyện của MobileNetV2 baseline cho thấy mô hình học rất nhanh:
 
 | Epoch | Train Acc | Val Acc | Nhận xét |
 |---:|---:|---:|---|
@@ -1529,7 +1664,23 @@ Log huấn luyện đã cho thấy mô hình học rất nhanh:
 
 Kết quả này cho thấy MobileNetV2 đủ mạnh cho dữ liệu biển báo custom. Tuy nhiên, vì validation tăng quá nhanh, cần ghi nhận rằng dataset có thể dễ hoặc validation có phân phối rất gần train.
 
-## 10.4. Overfitting và underfitting khi đọc curve
+Với phiên bản v7 có SE Attention, log ban đầu cũng cho thấy mô hình học nhanh. Ví dụ các epoch đầu:
+
+| Epoch | Train Acc | Val Acc | Nhận xét |
+|---:|---:|---:|---|
+| 1 | 18.56% | 25.88% | bắt đầu học |
+| 4 | 61.87% | 74.17% | đã học đặc trưng chính |
+| 7 | 80.87% | 89.99% | vượt mốc 85% |
+| 8 | 88.80% | 97.28% | validation tăng mạnh |
+| 9 | 92.63% | 97.93% | tiếp tục cải thiện |
+
+Bảng v7 trên mới là log trong quá trình train, chưa phải kết quả cuối. Khi train v7 đủ epoch, báo cáo cần bổ sung thêm best validation accuracy, test accuracy và F1-score cuối cùng để so sánh công bằng với v6.
+
+> Cần bổ sung hình: training/validation diagnostics của v7 sau khi train xong.
+>
+> Cần bổ sung hình: bảng so sánh v6 và v7 về `best_val_acc`, `test_acc`, `test_f1`, số tham số và thời gian mỗi epoch.
+
+## 11.4. Overfitting và underfitting khi đọc curve
 
 Underfitting:
 
@@ -1560,7 +1711,7 @@ val loss thấp hoặc ổn định
 
 Với log hiện tại, mô hình chưa có dấu hiệu overfitting rõ. Validation cao hơn train có thể do train đang dùng augmentation và dropout, còn validation thì sạch hơn.
 
-## 10.5. Đánh giá cuối
+## 11.5. Đánh giá cuối
 
 Báo cáo cuối nên có:
 
@@ -1569,7 +1720,11 @@ Báo cáo cuối nên có:
 - Recall macro.
 - F1 macro.
 - Confusion matrix.
+- Normalized confusion matrix.
 - Per-class accuracy.
+- Per-class precision, recall và F1.
+- Confidence distribution cho dự đoán đúng/sai.
+- Mean confidence và số lỗi theo từng class.
 - Một số ảnh dự đoán đúng.
 - Một số ảnh dự đoán sai.
 
@@ -1579,20 +1734,32 @@ Báo cáo cuối nên có:
 
 Các hình này giúp chứng minh mô hình không chỉ đạt accuracy tổng thể cao, mà còn hoạt động ổn định trên từng class.
 
+Với bản v7 có SE Attention, nên trình bày thêm một nhóm hình so sánh trực tiếp với v6. Mục tiêu không chỉ là chứng minh v7 có validation cao hơn, mà còn kiểm tra xem SE có giúp các class khó, ảnh mờ, ảnh nghiêng hoặc ảnh có nền phức tạp tốt hơn không.
+
+Các hình cần so sánh:
+
+- `training_validation_diagnostics.png` của v6 và v7.
+- `overall_metrics.png` của v6 và v7.
+- `confusion_matrix_normalized.png` của v6 và v7.
+- `per_class_metric_overview.png` của v6 và v7.
+- `class_confidence_errors.png` của v6 và v7.
+- Một vài `class_xx_samples.png` ở các class có lỗi hoặc class cải thiện rõ.
+
 ---
 
 # 12. Nhận xét, hạn chế và hướng cải thiện
 
-## 11.1. Ưu điểm của MobileNetV2 trong đề tài
+## 12.1. Ưu điểm của MobileNetV2 trong đề tài
 
 - Nhẹ hơn nhiều mô hình CNN lớn.
 - Tốc độ train và inference tốt.
 - Phù hợp ảnh biển báo crop.
 - Có cơ sở kiến trúc rõ ràng: depthwise separable convolution, inverted residual, linear bottleneck.
+- Phiên bản v7 bổ sung SE Attention để mô hình tự học mức độ quan trọng của từng channel đặc trưng.
 - Dễ triển khai bằng PyTorch từ đầu.
 - Kết quả validation vượt xa mốc yêu cầu 85%.
 
-## 11.2. Hạn chế
+## 12.2. Hạn chế
 
 MobileNetV2 trong notebook là classifier, không phải detector. Vì vậy nó không tự tìm vị trí biển báo trong ảnh nguyên cảnh.
 
@@ -1600,10 +1767,10 @@ Ngoài ra:
 
 - Nếu validation quá giống train, accuracy có thể cao hơn thực tế.
 - Nếu ảnh ngoài crop sai, model dễ dự đoán sai.
-- Nếu class chỉ khác chi tiết nhỏ, ảnh 96x96 có thể mất thông tin.
+- Nếu ảnh ngoài crop sai hoặc bị mờ mạnh, các chi tiết nhỏ vẫn có thể bị mất dù input là 224x224.
 - Nếu data quá dễ, mô hình đạt gần 100% không nhất thiết chứng minh khả năng tổng quát ngoài thực tế.
 
-## 11.3. Cách làm kết quả đáng tin hơn
+## 12.3. Cách làm kết quả đáng tin hơn
 
 - Dùng test set khác nguồn với train.
 - Đảm bảo split trước augmentation.
@@ -1612,32 +1779,115 @@ Ngoài ra:
 - Kiểm tra confusion matrix và per-class accuracy.
 - Test thêm ảnh ngoài tự crop.
 
-## 11.4. Hướng phát triển kiến trúc
+## 12.4. Hướng phát triển kiến trúc
 
 Có thể cải thiện từ MobileNetV2 theo các hướng:
 
 - MobileNetV3: thêm SE block, hard-swish, kiến trúc tối ưu bằng NAS.
 - EfficientNet-B0: compound scaling depth/width/resolution.
-- Thêm attention nhẹ như SE hoặc CBAM vào bottleneck.
+- Đã thử hướng thêm attention nhẹ bằng SE trong phiên bản v7; bước tiếp theo là so sánh định lượng với v6 trên test set và ảnh ngoài.
+- Có thể thử CBAM hoặc Coordinate Attention nếu SE chưa cải thiện rõ trên ảnh có background.
 - Knowledge distillation từ mô hình lớn hơn.
 - Quantization-aware training để triển khai trên thiết bị nhúng.
 - Kết hợp detector để xử lý ảnh nguyên cảnh.
 
 ---
 
-# 13. Kết luận
+# 13. Danh sách hình cần bổ sung cho phiên bản SE Attention
+
+Vì phiên bản v7 mới thêm SE Attention, báo cáo nên bổ sung các hình dưới đây sau khi train/test v7 hoàn tất. Các hình này giúp phần so sánh có căn cứ thay vì chỉ dựa vào validation log.
+
+## 13.1. Hình kiến trúc SE trong MobileNetV2
+
+Cần bổ sung:
+
+- Sơ đồ `Expansion -> Depthwise -> SE -> Projection -> Skip`.
+- Sơ đồ hoạt động SE: `Global Average Pooling -> C/reduction -> C -> Sigmoid -> nhân lại feature map`.
+
+Vị trí nên đặt:
+
+- Sau mục `5.11. SE Attention trong phiên bản v7`.
+
+## 13.2. Hình so sánh training v6 và v7
+
+Cần bổ sung:
+
+- Training/validation loss của v6 và v7.
+- Training/validation accuracy của v6 và v7.
+- Accuracy gap và loss gap của v7.
+- Learning rate và epoch time của v7.
+
+File gợi ý từ notebook:
+
+```text
+training_validation_diagnostics.png
+```
+
+Vị trí nên đặt:
+
+- Trong mục `10.3. Kết quả validation hiện tại`.
+
+## 13.3. Hình đánh giá test set của v7
+
+Cần bổ sung:
+
+- `overall_metrics.png`.
+- `confusion_matrix.png`.
+- `confusion_matrix_normalized.png`.
+- `per_class_metric_overview.png`.
+- `test_confidence_distribution.png`.
+- `class_confidence_errors.png`.
+
+Vị trí nên đặt:
+
+- Trong mục `10.5. Đánh giá cuối`.
+
+## 13.4. Hình phân tích class sau khi thêm SE
+
+Cần bổ sung:
+
+- Các hình `class_XX_metrics.png` cho class có lỗi.
+- Các hình `class_XX_samples.png` cho class cải thiện hoặc class còn nhầm.
+- Ảnh dự đoán sai trước/sau nếu có so sánh v6 và v7.
+
+Vị trí nên đặt:
+
+- Sau phần confusion matrix hoặc trong phụ lục kết quả thực nghiệm.
+
+## 13.5. Bảng so sánh cuối v6 và v7
+
+Cần bổ sung bảng:
+
+| Tiêu chí | v6 MobileNetV2 | v7 MobileNetV2-SE | Nhận xét |
+|---|---:|---:|---|
+| Best Val Acc | cần bổ sung | cần bổ sung | - |
+| Test Acc | cần bổ sung | cần bổ sung | - |
+| Test Precision | cần bổ sung | cần bổ sung | - |
+| Test Recall | cần bổ sung | cần bổ sung | - |
+| Test F1 | cần bổ sung | cần bổ sung | - |
+| Params | cần bổ sung | cần bổ sung | v7 tăng nhẹ |
+| Model size | cần bổ sung | cần bổ sung | v7 tăng nhẹ |
+| Time/epoch | cần bổ sung | cần bổ sung | v7 có thể chậm hơn |
+
+Vị trí nên đặt:
+
+- Cuối mục `10.5. Đánh giá cuối` hoặc ngay trước kết luận.
+
+---
+
+# 14. Kết luận
 
 MobileNetV2 là kiến trúc phù hợp cho bài toán phân loại biển báo giao thông đã crop vì nó cân bằng tốt giữa độ chính xác và hiệu quả tính toán. Trọng tâm của mô hình nằm ở inverted residual block với cấu trúc `narrow -> wide -> narrow`, trong đó expansion 1x1 convolution mở rộng không gian biểu diễn, depthwise 3x3 convolution xử lý đặc trưng không gian với chi phí thấp, và projection 1x1 convolution tuyến tính nén tensor về bottleneck hẹp mà không làm mất thông tin do ReLU.
 
 So với convolution thường, depthwise separable convolution giảm mạnh số phép tính. So với residual block truyền thống, inverted residual nối shortcut giữa các tensor hẹp, giúp giảm bộ nhớ và hỗ trợ gradient truyền qua mạng sâu. Linear bottleneck là điểm khác biệt quan trọng vì nó tránh phá hủy thông tin ở không gian channel thấp.
 
-Trong notebook, MobileNetV2 được triển khai từ đầu bằng PyTorch, không dùng pretrained. Kiến trúc gồm `ConvBNReLU6`, `InvertedResidual`, các stage bottleneck, adaptive average pooling và classifier cuối. Với input 96x96, first conv stride 1 giúp giữ chi tiết biển báo ở giai đoạn đầu. Kết quả validation hiện tại cho thấy mô hình học rất nhanh và đạt khoảng 99.95%, vượt yêu cầu 85%. Tuy nhiên, cần đánh giá thêm bằng test set độc lập và ảnh ngoài khó hơn để kết luận chắc chắn về khả năng tổng quát.
+Trong notebook, MobileNetV2 được triển khai từ đầu bằng PyTorch, không dùng pretrained. Kiến trúc gồm `ConvBNReLU6`, `InvertedResidual`, các stage bottleneck, adaptive average pooling và classifier cuối. Phiên bản v7 bổ sung `SEBlock` vào sau depthwise convolution để mô hình học trọng số quan trọng cho từng channel đặc trưng trước khi projection nén về bottleneck. Với dữ liệu hiện tại, cả baseline v6 và v7-SE đều học nhanh và vượt mốc yêu cầu 85% validation accuracy. Tuy nhiên, cần đánh giá thêm bằng test set độc lập và ảnh ngoài khó hơn để kết luận chắc chắn về khả năng tổng quát.
 
-Tóm lại, phần đóng góp chính của MobileNetV2 trong đề tài không chỉ nằm ở accuracy cao, mà ở thiết kế kiến trúc hiệu quả: nhẹ, có cơ sở lý thuyết, dễ triển khai và phù hợp với ứng dụng nhận dạng biển báo trên thiết bị hạn chế tài nguyên.
+Tóm lại, phần đóng góp chính của MobileNetV2 trong đề tài không chỉ nằm ở accuracy cao, mà ở thiết kế kiến trúc hiệu quả: nhẹ, có cơ sở lý thuyết, dễ triển khai và phù hợp với ứng dụng nhận dạng biển báo trên thiết bị hạn chế tài nguyên. Phiên bản MobileNetV2-SE là bước mở rộng hợp lý vì giữ được tính nhẹ của MobileNetV2 nhưng thêm khả năng chú ý theo channel, từ đó có tiềm năng cải thiện các class khó hoặc ảnh có nhiễu nền.
 
 ---
 
-# 14. Tài liệu tham khảo
+# 15. Tài liệu tham khảo
 
 [1] M. Sandler, A. Howard, M. Zhu, A. Zhmoginov, and L.-C. Chen, "MobileNetV2: Inverted Residuals and Linear Bottlenecks," Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 2018. CVF Open Access: https://openaccess.thecvf.com/content_cvpr_2018/html/Sandler_MobileNetV2_Inverted_Residuals_CVPR_2018_paper.html. arXiv HTML dùng cho hình minh họa: https://ar5iv.labs.arxiv.org/html/1801.04381.
 
@@ -1651,6 +1901,8 @@ Tóm lại, phần đóng góp chính của MobileNetV2 trong đề tài không 
 
 [6] TorchVision source, `torchvision.models.mobilenetv2`: https://docs.pytorch.org/vision/main/_modules/torchvision/models/mobilenetv2.html.
 
+[7] J. Hu, L. Shen, and G. Sun, "Squeeze-and-Excitation Networks," CVPR, 2018. https://arxiv.org/abs/1709.01507.
+
 ---
 
 # Phụ lục A. Những điểm nên nói khi bảo vệ
@@ -1659,6 +1911,9 @@ Tóm lại, phần đóng góp chính của MobileNetV2 trong đề tài không 
 - Điểm mới của MobileNetV2 so với MobileNetV1 là inverted residual và linear bottleneck.
 - Inverted residual nối shortcut giữa tensor hẹp, khác ResNet nối giữa tensor rộng.
 - Projection layer cuối block không dùng ReLU để tránh mất thông tin ở bottleneck.
+- SE Attention trong v7 học trọng số cho từng channel bằng `Global Average Pooling -> C/reduction -> C -> Sigmoid`.
+- SE được đặt sau depthwise convolution và trước projection để chọn lọc channel trước khi nén bottleneck.
+- `attention_reduction = 4` nghĩa là channel trong SE được nén theo tỉ lệ `C -> C/4 -> C`.
 - Trong notebook, model được xây dựng từ đầu, không dùng pretrained.
 - Output của model là logits; softmax chỉ dùng khi hiển thị xác suất.
 - Validation accuracy cao rất nhanh cho thấy dữ liệu dễ hoặc validation gần train; cần test độc lập để kết luận tổng quát.
